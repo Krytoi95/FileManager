@@ -56,4 +56,8 @@ int main()
     std::wcout << L"Access: " << timeAccess << L'\n';
     std::wcout << L"Write: " << timeWrite << L'\n';
     std::wcout << AttrMapping::getAttributesStr(file) << L'\n';
+    file.updateTruePath();
+    std::wcout << file.getPathConst() << L'\n';
+    file.updateExtension();
+    std::wcout << file.getExtension() << L'\n';
 }

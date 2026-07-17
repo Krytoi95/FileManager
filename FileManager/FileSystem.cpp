@@ -22,11 +22,10 @@ namespace AttrMapping {
 		{ FILE_ATTRIBUTE_UNPINNED, L"UNPINNED" }, // Только в облаке
 		{ FILE_ATTRIBUTE_STRICTLY_SEQUENTIAL, L"STRICTLY_SEQUENTIAL" } // Последовательный доступ
 	} };
-
-	std::wstring getAttributesStr(const File& file) {
+	std::wstring getAttributesStr(const FileSystemEntry* fileSystemEntry) {
 		std::wstring result{};
 		for (const AttributeMapping& attrMap : attrTable) {
-			if (file.getDwordFlagsAndAttributes() & attrMap.mask) {
+			if (fileSystemEntry->getDwordFlagsAndAttributes() & attrMap.mask) {
 				if (!result.empty()) {
 					result += L"; ";
 				}
@@ -40,7 +39,6 @@ namespace AttrMapping {
 
 		return result;
 	}
-
 }
 
 // CLASS FileSystem
@@ -49,48 +47,65 @@ bool fs::fileExist(const File& file) {
 	DWORD attrs = GetFileAttributesW(file.getPathConst().c_str());
 	return (attrs != INVALID_FILE_ATTRIBUTES) && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
 }
+bool fs::directoryExist(const Directory& dir) {
+	DWORD attrs = GetFileAttributesW(dir.getPathConst().c_str());
+	return (attrs != INVALID_FILE_ATTRIBUTES) && (attrs & FILE_ATTRIBUTE_DIRECTORY);
+}
 bool fs::isOpened(const FileSystemEntry& fileSystemEntry) {
 	return fileSystemEntry.getHandleConst() != INVALID_HANDLE_VALUE;
 }
 DWORD fs::getLastError() { return GetLastError(); }
-bool fs::createFile(
-	File& file,
+bool fs::createFileSystemEntry(
+	FileSystemEntry* fileSystemEntry,
 	const DWORD dwDesiredAccess,
 	const DWORD dwCreationDisposition,
 	const DWORD dwFlagsAndAttributes,
 	const DWORD dwShareMode,
 	const LPSECURITY_ATTRIBUTES lpSecurityAttributes,
 	const HANDLE hTemplateFile
-) {
-	HANDLE handle{ CreateFileW(file.getPathConst().c_str(), dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile) };
+) {	
+	HANDLE handle{ CreateFileW(fileSystemEntry->getPathConst().c_str(), dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile) };
 	if (handle == INVALID_HANDLE_VALUE) {
 		return false;
 	}
-	file.setHandle(handle);
+	fileSystemEntry->setHandle(handle);
 	return true;
 }
-bool fs::createDirectory() {
-	return true;
+int fs::copyFileSystemEntry(const FileSystemEntry* original, const FileSystemEntry* copy) {
+	std::wstring fromStr = original->getPathConst() + std::wstring(L"\0", 1);
+	std::wstring toStr = copy->getPathConst() + std::wstring(L"\0", 1);
+	fileOp = { 0 };
+	fileOp.wFunc = FO_COPY;
+	fileOp.pFrom = original->getPathConst().c_str();
+	fileOp.pTo = copy->getPathConst().c_str();
+	fileOp.fFlags = FOF_NOCONFIRMMKDIR;
+	return SHFileOperationW(&fileOp);
 }
-bool fs::copyFile() {
-	return true;
+int fs::moveFileSystemEntry(const FileSystemEntry* fileFrom, const FileSystemEntry* fileTo) {
+	std::wstring fromStr = fileFrom->getPathConst() + std::wstring(L"\0", 1);
+	std::wstring toStr = fileTo->getPathConst() + std::wstring(L"\0", 1);
+	fileOp = { 0 };
+	fileOp.wFunc = FO_MOVE;
+	fileOp.pFrom = fileFrom->getPathConst().c_str();
+	fileOp.pTo = fileTo->getPathConst().c_str();
+	fileOp.fFlags = FOF_NOCONFIRMATION | FOF_NOCONFIRMMKDIR;
+	return SHFileOperationW(&fileOp);
 }
-bool fs::moveFile() {
-	return true;
+int fs::deleteFileSystemEntry(const FileSystemEntry* fileFrom) {
+	std::wstring fromStr = fileFrom->getPathConst() + std::wstring(L"\0", 1);
+	fileOp = { 0 };
+	fileOp.wFunc = FO_DELETE;
+	fileOp.pFrom = fileFrom->getPathConst().c_str();
+	fileOp.fFlags = FOF_NOCONFIRMATION | FOF_SILENT;
+	return SHFileOperationW(&fileOp);
 }
-bool fs::deletFile() {
-	return true;
-}
-bool fs::deleteDirectory() {
-	return true;
-}
+
+SHFILEOPSTRUCTW fs::fileOp { 0 };
+
 
 // CLASS FileSystemEntry
 fse::FileSystemEntry(const HANDLE handle, const std::wstring& path) : handle{ handle }, path{ path } {}
 fse::~FileSystemEntry() { this->close(); }
-//bool fse::open(const std::wstring& path) {}
-//bool fse::open()
-//LONGLONG fse::getSize() {}
 void fse::close() {
 	if (fs::isOpened(*this)) {
 		CloseHandle(this->handle);
@@ -100,7 +115,22 @@ void fse::close() {
 bool fse::updateInfo() {
 	return GetFileInformationByHandle(this->handle, &info);
 }
-
+bool fse::updateTruePath() {
+	DWORD bufferSize{ GetFinalPathNameByHandleW(this->handle, nullptr, 0, VOLUME_NAME_DOS) };
+	if (bufferSize == 0) {
+		return false;
+	}
+	this->path.resize(bufferSize);
+	DWORD resultSize{ GetFinalPathNameByHandleW(this->handle, &path[0], bufferSize, VOLUME_NAME_DOS) };
+	if (resultSize == 0 || resultSize >= bufferSize) {
+		return false;
+	}
+	this->path.resize(resultSize);
+	if (this->path.rfind(L"\\\\?\\", 0) == 0) {
+		this->path = this->path.substr(4);
+	}
+	return true;
+}
 // Getter
 const HANDLE& fse::getHandleConst() const { return this->handle; }
 const std::wstring& fse::getPathConst() const { return this->path; }
@@ -108,14 +138,6 @@ const FILETIME& fse::getFileTimeCreation() const { return this->info.ftCreationT
 const FILETIME& fse::getFileTimeAccess() const { return this->info.ftLastAccessTime; }
 const FILETIME& fse::getFileTimeWrite() const { return this->info.ftLastWriteTime; }
 DWORD fse::getDwordFlagsAndAttributes() const { return this->info.dwFileAttributes; }
-/*	DWORD getDesiredAccess() { return this->dwDesiredAccess; }
-	DWORD getShareMode() { return this->dwShareMode; }
-	DWORD getFlagsAndAttributes() { return this->dwFlagsAndAttributes; }
-	LPSECURITY_ATTRIBUTES getSecAttributes() { return this->lpSecurityAttributes; }
-	LARGE_INTEGER getSize() { return this->size; }
-	FILETIME getTimeCreation() { return this->creation; }
-	FILETIME getTimeAccess() { return this->access; }
-	FILETIME getTimeWrite() { return this->write; }*/
 
 // Setter
 void fse::setHandle(const HANDLE& handle) { this->handle = handle; }
@@ -125,25 +147,20 @@ void fse::setHandle(const HANDLE& handle) { this->handle = handle; }
 f::File() : FileSystemEntry(INVALID_HANDLE_VALUE, L"") {}
 f::File(const std::wstring& path) : FileSystemEntry(INVALID_HANDLE_VALUE, path) {}
 f::~File() {}
-/*const LPCWSTR& lpPath, DWORD dwDesiredAccess,
-	DWORD dwShareMode,
-	LPSECURITY_ATTRIBUTES lpSecurityAttributes,
-	DWORD dwCreationDisposition,
-	DWORD dwFlagsAndAttributes,
-	HANDLE hTemplateFile*/
+
 
 
 bool f::open(
 	const std::wstring& path,
 	const DWORD dwDesiredAccess,
 	const DWORD dwCreationDisposition,
-	const DWORD dwFlagsAndAttribute,
+	const DWORD dwFlagsAndAttributes,
 	const DWORD dwShareMode,
 	const LPSECURITY_ATTRIBUTES lpSecurityAttributes,
 	const HANDLE hTemplateFile) {
 	
 	this->path = path;
-	fs::createFile(*this, dwDesiredAccess, dwCreationDisposition, dwFlagsAndAttribute, dwShareMode, lpSecurityAttributes, hTemplateFile);
+	fs::createFileSystemEntry(this, dwDesiredAccess, dwCreationDisposition, dwFlagsAndAttributes, dwShareMode, lpSecurityAttributes, hTemplateFile);
 	return fs::isOpened(*this);
 }
 bool f::open() {
@@ -152,16 +169,8 @@ bool f::open() {
 bool f::open(const std::wstring& path) {
 	return this->open(path, GENERIC_READ | GENERIC_WRITE, OPEN_ALWAYS);
 }
-LONGLONG f::getSize() {
-	if (!GetFileSizeEx(this->handle, &fileSize)) {
-		return -1;
-	}
-	return this->fileSize.QuadPart; 
-}
-LARGE_INTEGER f::getFilePointer() { return this->filePointer; }
-bool f::setFilePointer(LARGE_INTEGER liDistanceToMove, DWORD dwMoveMethod) {
-	return SetFilePointerEx(this->handle, liDistanceToMove, &filePointer, dwMoveMethod);
-}
+
+
 bool f::write(LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite, LPDWORD lpNumberOfBytesWritten, LPOVERLAPPED lpOverlapped) {
 	return WriteFile(this->handle, lpBuffer, nNumberOfBytesToWrite, lpNumberOfBytesWritten, lpOverlapped);
 }
@@ -205,4 +214,52 @@ bool f::read(std::string& str, LPDWORD lpNumberOfBytesRead, LPOVERLAPPED lpOverl
 	return true;
 }
 
+bool f::updateExtension() {
+	this->extension = PathFindExtensionW(this->path.c_str());
+	if (*extension == L'\0') {
+		return false;
+	}
+	return true;
+}
+
+// Getter
+const PCWSTR& f::getExtension() const {
+	return this->extension;
+}
+LONGLONG f::getSize() {
+	if (!GetFileSizeEx(this->handle, &fileSize)) {
+		return -1;
+	}
+	return this->fileSize.QuadPart;
+}
+LARGE_INTEGER f::getFilePointer() { return this->filePointer; }
+
+// Setter
+bool f::setFilePointer(LARGE_INTEGER liDistanceToMove, DWORD dwMoveMethod) {
+	return SetFilePointerEx(this->handle, liDistanceToMove, &filePointer, dwMoveMethod);
+}
+
 // CLASS Directory
+
+bool d::open(
+	const std::wstring& path,
+	const DWORD dwDesiredAccess, 
+	const DWORD dwCreationDisposition,
+	const DWORD dwFlagsAndAttributes,
+	const DWORD dwShareMode,
+	const LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+	const HANDLE hTemplateFile) {
+
+	this->path = path;
+	fs::createFileSystemEntry(this, dwDesiredAccess, dwCreationDisposition, dwFlagsAndAttributes, dwShareMode, lpSecurityAttributes, hTemplateFile);
+	return fs::isOpened(*this);
+}
+bool d::open() {
+	return this->open(this->path, GENERIC_READ, OPEN_EXISTING);
+}
+
+bool d::open(const std::wstring& path) {
+	return this->open(path, GENERIC_READ, OPEN_EXISTING);
+}
+
+LONGLONG d::getSize() {}
